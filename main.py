@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import datetime
 import json
 import os
@@ -258,8 +259,9 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                     # 3. Health Metrics
                     if "LINK" in c_val and "ZEGARKA" in c_val and "LINK" not in updated_health:
                         if daily_activity_links and is_empty(3):
-                            # Write the first activity link; subsequent ones go in the rows below
-                            queue_update("Link z Zegarka", daily_activity_links[0], i, 3)
+                            # Write all activity links joined by newlines
+                            links_str = "\n".join(daily_activity_links)
+                            queue_update("Link z Zegarka", links_str, i, 3)
                             updated_health.add("LINK")
                     elif "HRV" in c_val and "ZMIENNOŚĆ" in c_val and "HRV" not in updated_health:
                         val = daily_sleep.get("avgOvernightHrv")
@@ -447,6 +449,10 @@ def fetch_race_predictions(api, start_date, end_date):
     return formatted_preds
 
 def main():
+    parser = argparse.ArgumentParser(description="Sync Garmin data to Google Sheets")
+    parser.add_argument("--days", type=int, default=7, help="Number of past days to sync (default: 7)")
+    args = parser.parse_args()
+
     email = os.getenv("EMAIL")
     password = os.getenv("PASSWORD")
     tokenstore = os.getenv("GARMINTOKENS") or "~/.garminconnect"
@@ -457,12 +463,12 @@ def main():
         sys.exit(1)
 
     today = datetime.date.today()
-    week_ago = today - datetime.timedelta(days=7)
+    start_date = today - datetime.timedelta(days=args.days)
     
-    all_sleep_data = fetch_sleep_data(api, today, days=7)
-    all_training_data = fetch_training_data(api, week_ago, today)
-    status_data = fetch_training_status(api, today, days=7)
-    formatted_preds = fetch_race_predictions(api, week_ago, today)
+    all_sleep_data = fetch_sleep_data(api, today, days=args.days)
+    all_training_data = fetch_training_data(api, start_date, today)
+    status_data = fetch_training_status(api, today, days=args.days)
+    formatted_preds = fetch_race_predictions(api, start_date, today)
 
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if spreadsheet_id:

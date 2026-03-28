@@ -51,12 +51,16 @@ pip install gspread google-auth garminconnect cloudscraper garth
 Run the script using Python:
 
 ```bash
+# Sync data for the default 7 past days
 python3 main.py
+
+# Sync data for a specific number of past days (e.g., last 14 days)
+python3 main.py --days 14
 ```
 
 The script will:
 1.  Log in to Garmin Connect.
-2.  Fetch sleep, activity, training status, and race prediction data for the last 7 days.
+2.  Fetch sleep, activity, training status, and race prediction data for the specified number of days (default: 7).
 3.  Scan your Google Sheet worksheets for matching dates.
 4.  Populate the data into the correct cells, providing detailed logs in the terminal.
 
