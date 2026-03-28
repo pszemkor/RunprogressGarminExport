@@ -467,6 +467,8 @@ def main():
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if spreadsheet_id:
         export_to_google_sheets(spreadsheet_id, all_sleep_data, all_training_data, status_data, formatted_preds)
+    else:
+        print("⚠️ SPREADSHEET_ID env var is missing. Skipping Google Sheets export.")
 
 if __name__ == "__main__":
     main()

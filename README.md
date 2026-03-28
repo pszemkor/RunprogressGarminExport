@@ -1,6 +1,6 @@
-# Garmin to Google Sheets Sync (Forma Template)
+# Garmin to Google Sheets Sync 
 
-This script automates the synchronization of health, training, and race prediction data from Garmin Connect to a specific, formatted Google Sheets template ("Forma").
+This script automates the synchronization of health, training, and race prediction data from Garmin Connect to a specific, formatted Google Sheets template.
 
 ## Features
 
@@ -24,7 +24,7 @@ To interact with Google Sheets, you need a Service Account:
 3.  Enable the **Google Sheets API**.
 4.  Navigate to **IAM & Admin > Service Accounts**.
 5.  Create a Service Account and download the **JSON Key file**.
-6.  **Important**: Open the JSON file and find the `client_email` address. Go to your "Forma" Google Sheet and share it with this email address as an **Editor**.
+6.  Go to your Google Sheet and share it with the service account email address as an **Editor**.
 
 ### 3. Environment Variables
 The script uses environment variables for configuration. You can set these in your shell or use a `.env` file (if you add `python-dotenv` support).
