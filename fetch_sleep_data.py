@@ -83,6 +83,112 @@ def init_api(email: str | None = None, password: str | None = None, tokenstore: 
         print(f"❌ Connection error: {err}")
         return None
 
+def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data: list, status_data: dict, preds_data: dict):
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except ImportError:
+        print("💡 Please run 'pip install gspread google-auth' to enable Google Sheets export.")
+        return
+
+    creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if not creds_path or not os.path.exists(creds_path):
+        print("⚠️ GOOGLE_APPLICATION_CREDENTIALS env var is missing or invalid. Skipping Google Sheets export.")
+        print("   Set it to the path of your Service Account JSON file.")
+        return
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    
+    print(f"\n--------------------------------------------------")
+    print(f"Exporting data to Google Spreadsheet: {spreadsheet_id}...")
+    try:
+        creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        
+        # --- 1. Export Sleep Data ---
+        try:
+            ws_sleep = spreadsheet.worksheet("Sleep Data")
+        except gspread.WorksheetNotFound:
+            ws_sleep = spreadsheet.add_worksheet(title="Sleep Data", rows=1000, cols=10)
+            ws_sleep.append_row(["Date", "Resting HR", "Avg HRV", "Sleep Hours"])
+            
+        existing_sleep_dates = ws_sleep.col_values(1)
+        for date_str, data in sleep_data.items():
+            if date_str not in existing_sleep_dates and "error" not in data:
+                ws_sleep.append_row([
+                    date_str, 
+                    data.get("restingHeartRate", ""), 
+                    data.get("avgOvernightHrv", ""), 
+                    data.get("sleepTimeHours", "")
+                ])
+
+        # --- 2. Export Activity Data ---
+        try:
+            ws_act = spreadsheet.worksheet("Activities")
+        except gspread.WorksheetNotFound:
+            ws_act = spreadsheet.add_worksheet(title="Activities", rows=1000, cols=15)
+            ws_act.append_row(["ID", "Name", "Type", "Start Time", "Duration (min)", "Distance (km)", "Calories", "Avg HR", "Load", "Effect"])
+            
+        existing_act_ids = ws_act.col_values(1)
+        for act in training_data:
+            act_id_str = str(act.get("activityId"))
+            if act_id_str not in existing_act_ids:
+                ws_act.append_row([
+                    act_id_str,
+                    act.get("activityName", ""),
+                    act.get("activityType", ""),
+                    act.get("startTime", ""),
+                    act.get("durationMinutes", ""),
+                    act.get("distanceKm", ""),
+                    act.get("calories", ""),
+                    act.get("averageHeartRate", ""),
+                    act.get("trainingLoad", ""),
+                    act.get("trainingEffect", "")
+                ])
+
+        # --- 3. Export Race Predictions ---
+        try:
+            ws_preds = spreadsheet.worksheet("Race Predictions")
+        except gspread.WorksheetNotFound:
+            ws_preds = spreadsheet.add_worksheet(title="Race Predictions", rows=1000, cols=10)
+            ws_preds.append_row(["Date", "5K", "10K", "Half Marathon", "Marathon"])
+            
+        existing_pred_dates = ws_preds.col_values(1)
+        for date_str, times in preds_data.items():
+            if date_str not in existing_pred_dates:
+                ws_preds.append_row([
+                    date_str,
+                    times.get("5K", ""),
+                    times.get("10K", ""),
+                    times.get("HalfMarathon", ""),
+                    times.get("Marathon", "")
+                ])
+                
+        # --- 4. Export Training Status ---
+        try:
+            ws_status = spreadsheet.worksheet("Training Status")
+        except gspread.WorksheetNotFound:
+            ws_status = spreadsheet.add_worksheet(title="Training Status", rows=1000, cols=10)
+            ws_status.append_row(["Date", "Status", "Acute Load", "Chronic Load"])
+            
+        existing_status_dates = ws_status.col_values(1)
+        if status_data and status_data.get("date") not in existing_status_dates:
+            ws_status.append_row([
+                status_data.get("date"),
+                status_data.get("status"),
+                status_data.get("acute_load"),
+                status_data.get("chronic_load")
+            ])
+            
+        print("✅ Data successfully exported to Google Sheets!")
+
+    except Exception as e:
+        print(f"❌ Failed to export to Google Sheets: {e}")
+
 def main():
     email = os.getenv("EMAIL")
     password = os.getenv("PASSWORD")
@@ -167,6 +273,7 @@ def main():
     # Fetch daily training status / load for today
     print("\n--------------------------------------------------")
     print(f"Fetching today's overall Training Status / Load for {today.isoformat()}...")
+    status_data = {}
     try:
         ts = api.get_training_status(today.isoformat())
         if ts and "mostRecentTrainingStatus" in ts:
@@ -176,10 +283,18 @@ def main():
                 acute_load = device_data.get("acuteTrainingLoadDTO", {}).get("dailyTrainingLoadAcute")
                 chronic_load = device_data.get("acuteTrainingLoadDTO", {}).get("dailyTrainingLoadChronic")
                 phrase = device_data.get("trainingStatusFeedbackPhrase", "Unknown")
+                formatted_phrase = DeviceDataPhraseFormat(phrase)
                 
-                print(f"Overall Training Status: {DeviceDataPhraseFormat(phrase)}")
+                print(f"Overall Training Status: {formatted_phrase}")
                 print(f"Acute Training Load: {acute_load}")
                 print(f"Chronic Training Load: {chronic_load}")
+                
+                status_data = {
+                    "date": today.isoformat(),
+                    "status": formatted_phrase,
+                    "acute_load": acute_load,
+                    "chronic_load": chronic_load
+                }
             else:
                 print("No recent training status data found.")
     except Exception as e:
@@ -188,10 +303,10 @@ def main():
     # Fetch daily race predictions
     print("\n--------------------------------------------------")
     print(f"Fetching race predictions for the past 7 days (from {week_ago.isoformat()} to {today.isoformat()})...")
+    formatted_preds = {}
     try:
         predictions = api.get_race_predictions(week_ago.isoformat(), today.isoformat(), 'daily')
         if predictions:
-            formatted_preds = {}
             def format_time(seconds):
                 if not seconds: return None
                 m, s = divmod(seconds, 60)
@@ -214,6 +329,10 @@ def main():
             print("No race prediction data found.")
     except Exception as e:
         print(f"Failed to fetch race predictions: {e}")
+
+    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    if spreadsheet_id:
+        export_to_google_sheets(spreadsheet_id, all_sleep_data, all_training_data, status_data, formatted_preds)
 
 if __name__ == "__main__":
     def DeviceDataPhraseFormat(phrase):
