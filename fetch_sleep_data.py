@@ -189,23 +189,19 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
     except Exception as e:
         print(f"❌ Failed to export to Google Sheets: {e}")
 
-def main():
-    email = os.getenv("EMAIL")
-    password = os.getenv("PASSWORD")
-    tokenstore = os.getenv("GARMINTOKENS") or "~/.garminconnect"
+def format_time(seconds):
+    if not seconds: return None
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
-    api = init_api(email, password, tokenstore)
-    if not api:
-        print("Failed to initialize Garmin API")
-        sys.exit(1)
+def device_data_phrase_format(phrase):
+    return phrase.replace("_", " ").title() if phrase else "Unknown"
 
-    today = datetime.date.today()
-    print(f"\nFetching sleep data for the past 7 days (ending {today.isoformat()})...")
-
+def fetch_sleep_data(api, today, days=7):
+    print(f"\nFetching sleep data for the past {days} days (ending {today.isoformat()})...")
     all_sleep_data = {}
-    
-    # Fetch data for the past 7 days (including today)
-    for i in range(7):
+    for i in range(days):
         target_date = today - datetime.timedelta(days=i)
         date_str = target_date.isoformat()
         print(f"Fetching data for {date_str}...")
@@ -236,15 +232,15 @@ def main():
 
     print("\nSleep data retrieved successfully!")
     print(json.dumps(all_sleep_data, indent=4))
+    return all_sleep_data
 
-    # Fetch training data for the past 7 days
-    week_ago = today - datetime.timedelta(days=7)
+def fetch_training_data(api, start_date, end_date):
     print("\n--------------------------------------------------")
-    print(f"Fetching training/activity data for the past 7 days (from {week_ago.isoformat()} to {today.isoformat()})...")
+    print(f"Fetching training/activity data (from {start_date.isoformat()} to {end_date.isoformat()})...")
 
     all_training_data = []
     try:
-        activities = api.get_activities_by_date(week_ago.isoformat(), today.isoformat())
+        activities = api.get_activities_by_date(start_date.isoformat(), end_date.isoformat())
         for act in activities:
             duration_mins = round((act.get("duration") or 0) / 60.0, 2)
             distance_km = round((act.get("distance") or 0) / 1000.0, 2)
@@ -269,13 +265,14 @@ def main():
         print(json.dumps(all_training_data, indent=4))
     except Exception as e:
         print(f"Failed to fetch training data: {e}")
+    return all_training_data
 
-    # Fetch daily training status / load for today
+def fetch_training_status(api, date):
     print("\n--------------------------------------------------")
-    print(f"Fetching today's overall Training Status / Load for {today.isoformat()}...")
+    print(f"Fetching overall Training Status / Load for {date.isoformat()}...")
     status_data = {}
     try:
-        ts = api.get_training_status(today.isoformat())
+        ts = api.get_training_status(date.isoformat())
         if ts and "mostRecentTrainingStatus" in ts:
             latest_ts_data = ts["mostRecentTrainingStatus"].get("latestTrainingStatusData", {})
             if latest_ts_data:
@@ -283,14 +280,14 @@ def main():
                 acute_load = device_data.get("acuteTrainingLoadDTO", {}).get("dailyTrainingLoadAcute")
                 chronic_load = device_data.get("acuteTrainingLoadDTO", {}).get("dailyTrainingLoadChronic")
                 phrase = device_data.get("trainingStatusFeedbackPhrase", "Unknown")
-                formatted_phrase = DeviceDataPhraseFormat(phrase)
+                formatted_phrase = device_data_phrase_format(phrase)
                 
                 print(f"Overall Training Status: {formatted_phrase}")
                 print(f"Acute Training Load: {acute_load}")
                 print(f"Chronic Training Load: {chronic_load}")
                 
                 status_data = {
-                    "date": today.isoformat(),
+                    "date": date.isoformat(),
                     "status": formatted_phrase,
                     "acute_load": acute_load,
                     "chronic_load": chronic_load
@@ -299,20 +296,15 @@ def main():
                 print("No recent training status data found.")
     except Exception as e:
         print(f"Failed to fetch general training status: {e}")
+    return status_data
 
-    # Fetch daily race predictions
+def fetch_race_predictions(api, start_date, end_date):
     print("\n--------------------------------------------------")
-    print(f"Fetching race predictions for the past 7 days (from {week_ago.isoformat()} to {today.isoformat()})...")
+    print(f"Fetching race predictions (from {start_date.isoformat()} to {end_date.isoformat()})...")
     formatted_preds = {}
     try:
-        predictions = api.get_race_predictions(week_ago.isoformat(), today.isoformat(), 'daily')
+        predictions = api.get_race_predictions(start_date.isoformat(), end_date.isoformat(), 'daily')
         if predictions:
-            def format_time(seconds):
-                if not seconds: return None
-                m, s = divmod(seconds, 60)
-                h, m = divmod(m, 60)
-                return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
-                
             for p in predictions:
                 date_key = p.get("calendarDate")
                 if not date_key: continue
@@ -329,12 +321,29 @@ def main():
             print("No race prediction data found.")
     except Exception as e:
         print(f"Failed to fetch race predictions: {e}")
+    return formatted_preds
+
+def main():
+    email = os.getenv("EMAIL")
+    password = os.getenv("PASSWORD")
+    tokenstore = os.getenv("GARMINTOKENS") or "~/.garminconnect"
+
+    api = init_api(email, password, tokenstore)
+    if not api:
+        print("Failed to initialize Garmin API")
+        sys.exit(1)
+
+    today = datetime.date.today()
+    week_ago = today - datetime.timedelta(days=7)
+    
+    all_sleep_data = fetch_sleep_data(api, today, days=7)
+    all_training_data = fetch_training_data(api, week_ago, today)
+    status_data = fetch_training_status(api, today)
+    formatted_preds = fetch_race_predictions(api, week_ago, today)
 
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if spreadsheet_id:
         export_to_google_sheets(spreadsheet_id, all_sleep_data, all_training_data, status_data, formatted_preds)
 
 if __name__ == "__main__":
-    def DeviceDataPhraseFormat(phrase):
-        return phrase.replace("_", " ").title() if phrase else "Unknown"
     main()
