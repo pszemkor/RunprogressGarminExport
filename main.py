@@ -448,9 +448,86 @@ def fetch_race_predictions(api, start_date, end_date):
         print(f"Failed to fetch race predictions: {e}")
     return formatted_preds
 
+def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
+    """Fetch HR zone time for each activity and print aggregated times for the [start_date, end_date] interval."""
+    print("\n--------------------------------------------------")
+    print(f"Fetching heart rate zone data for activities between {start_date.isoformat()} and {end_date.isoformat()} (inclusive)...")
+    
+    # Initialize aggregated seconds for zones 1 to 5
+    aggregated_zones = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+    has_hr_data = False
+
+    for act in training_data:
+        act_id = act.get("activityId")
+        act_name = act.get("activityName", "Unknown Activity")
+        act_type = act.get("activityType", "other")
+        start_time_str = act.get("startTime")
+        
+        if not act_id or not start_time_str:
+            continue
+            
+        try:
+            # Extract date part e.g. "2026-05-17" from "2026-05-17 09:32:21"
+            act_date = datetime.datetime.strptime(start_time_str[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+            
+        # Check if activity falls within the inclusive interval
+        if not (start_date <= act_date <= end_date):
+            continue
+            
+        print(f"Fetching HR zones for '{act_name}' ({act_type}) on {start_time_str}...")
+        try:
+            hr_zones = api.get_activity_hr_in_timezones(act_id)
+            if hr_zones:
+                print(f"  Data retrieved: {len(hr_zones)} zones found.")
+                for zone in hr_zones:
+                    z_num = zone.get("zoneNumber")
+                    secs = zone.get("secsInZone", 0.0)
+                    if z_num in aggregated_zones:
+                        aggregated_zones[z_num] += secs
+                        if secs > 0:
+                            has_hr_data = True
+            else:
+                print("  No HR zone data found for this activity.")
+        except Exception as e:
+            print(f"  Could not retrieve HR zones: {e}")
+
+    print("\n==================================================")
+    print(f"AGGREGATED HEART RATE ZONES FROM {start_date.isoformat()} TO {end_date.isoformat()}")
+    print("==================================================")
+    if has_hr_data:
+        total_active_secs = sum(aggregated_zones.values())
+        for z_num in sorted(aggregated_zones.keys(), reverse=True):
+            total_secs = aggregated_zones[z_num]
+            pct = (total_secs / total_active_secs * 100) if total_active_secs > 0 else 0.0
+            
+            h, m = divmod(int(total_secs), 3600)
+            m, s = divmod(m, 60)
+            time_str = f"{h:02d}:{m:02d}:{s:02d}"
+            
+            zone_desc = {
+                1: "Zone 1 (Warm Up)",
+                2: "Zone 2 (Easy/Aerobic)",
+                3: "Zone 3 (Aerobic/Tempo)",
+                4: "Zone 4 (Threshold)",
+                5: "Zone 5 (Anaerobic/Max)"
+            }.get(z_num, f"Zone {z_num}")
+            
+            bar_len = 20
+            filled_len = int(round(bar_len * pct / 100))
+            bar = "█" * filled_len + "░" * (bar_len - filled_len)
+            
+            print(f"  {zone_desc:<25} : {time_str:>8}  [{bar}] {pct:>5.1f}% ({total_secs:.1f}s)")
+    else:
+        print("  No heart rate zone data recorded in the exercises during this period.")
+    print("==================================================")
+
 def main():
     parser = argparse.ArgumentParser(description="Sync Garmin data to Google Sheets")
     parser.add_argument("--days", type=int, default=7, help="Number of past days to sync (default: 7)")
+    parser.add_argument("--hr-start", type=str, help="Start date for aggregated heart rate zones (YYYY-MM-DD)")
+    parser.add_argument("--hr-end", type=str, help="End date for aggregated heart rate zones (YYYY-MM-DD)")
     args = parser.parse_args()
 
     email = os.getenv("EMAIL")
@@ -465,10 +542,33 @@ def main():
     today = datetime.date.today()
     start_date = today - datetime.timedelta(days=args.days)
     
+    # Parse HR parameters if passed
+    hr_start = None
+    hr_end = None
+    if args.hr_start or args.hr_end:
+        try:
+            hr_start = datetime.date.fromisoformat(args.hr_start) if args.hr_start else start_date
+            hr_end = datetime.date.fromisoformat(args.hr_end) if args.hr_end else today
+        except ValueError as e:
+            print(f"❌ Invalid date format for --hr-start or --hr-end. Use YYYY-MM-DD. Error: {e}")
+            sys.exit(1)
+
+    # Determine date range for fetching activities to cover both standard sync and HR zone interval
+    fetch_start = start_date
+    fetch_end = today
+    if hr_start and hr_start < fetch_start:
+        fetch_start = hr_start
+    if hr_end and hr_end > fetch_end:
+        fetch_end = hr_end
+    
     all_sleep_data = fetch_sleep_data(api, today, days=args.days)
-    all_training_data = fetch_training_data(api, start_date, today)
+    all_training_data = fetch_training_data(api, fetch_start, fetch_end)
     status_data = fetch_training_status(api, today, days=args.days)
     formatted_preds = fetch_race_predictions(api, start_date, today)
+
+    # Fetch and print heart rate zones for the exercises if parameters are passed
+    if hr_start and hr_end:
+        fetch_and_print_hr_zones(api, all_training_data, hr_start, hr_end)
 
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if spreadsheet_id:
