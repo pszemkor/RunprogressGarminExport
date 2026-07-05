@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
 import argparse
 import datetime
@@ -553,20 +554,33 @@ def main():
             print(f"❌ Invalid date format for --hr-start or --hr-end. Use YYYY-MM-DD. Error: {e}")
             sys.exit(1)
 
-    # Determine date range for fetching activities to cover both standard sync and HR zone interval
+    # Determine date range for fetching activities to cover standard sync, custom HR zone, and weekly HR zones
     fetch_start = start_date
     fetch_end = today
     if hr_start and hr_start < fetch_start:
         fetch_start = hr_start
     if hr_end and hr_end > fetch_end:
         fetch_end = hr_end
+        
+    # Calculate dates for current week and previous week
+    current_week_start = today - datetime.timedelta(days=today.weekday())
+    current_week_end = today
+    prev_week_start = current_week_start - datetime.timedelta(days=7)
+    prev_week_end = current_week_start - datetime.timedelta(days=1)
+    
+    if prev_week_start < fetch_start:
+        fetch_start = prev_week_start
     
     all_sleep_data = fetch_sleep_data(api, today, days=args.days)
     all_training_data = fetch_training_data(api, fetch_start, fetch_end)
     status_data = fetch_training_status(api, today, days=args.days)
     formatted_preds = fetch_race_predictions(api, start_date, today)
 
-    # Fetch and print heart rate zones for the exercises if parameters are passed
+    # Always fetch and print heart rate zones for previous week and current week
+    fetch_and_print_hr_zones(api, all_training_data, prev_week_start, prev_week_end)
+    fetch_and_print_hr_zones(api, all_training_data, current_week_start, current_week_end)
+
+    # Fetch and print heart rate zones for the exercises if custom parameters are passed
     if hr_start and hr_end:
         fetch_and_print_hr_zones(api, all_training_data, hr_start, hr_end)
 
