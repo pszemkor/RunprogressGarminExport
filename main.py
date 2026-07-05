@@ -85,7 +85,7 @@ def init_api(email: str | None = None, password: str | None = None, tokenstore: 
         print(f"❌ Connection error: {err}")
         return None
 
-def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data: list, status_data: dict, preds_data: dict):
+def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data: list, status_data: dict, preds_data: dict, weekly_hr_zones: dict = None):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -280,9 +280,41 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                             queue_update("Sleep Hours", hours_to_time_str(val), i, 3)
                             updated_health.add("SLEEP")
                             
+                # 4. Weekly HR Zones (only if it's Sunday)
+                if weekly_hr_zones and date_obj.weekday() == 6:
+                    zones = weekly_hr_zones.get(date_str)
+                    if zones:
+                        hr_r_idx = -1
+                        hr_c_idx = -1
+                        for i in range(r_idx, min(r_idx + 45, len(data))):
+                            row = data[i]
+                            for j in range(c_idx + 1, len(row)):
+                                if "STREFA TĘTNA" in str(row[j]).upper():
+                                    hr_r_idx = i
+                                    hr_c_idx = j
+                                    break
+                            if hr_r_idx != -1:
+                                break
+                                
+                        if hr_r_idx != -1:
+                            print(f"  Found 'Strefa tętna' table for {date_str} at cell ({hr_r_idx+1}, {hr_c_idx+1})")
+                            for z in range(5, 0, -1):
+                                search_str = f"STREFA {z}"
+                                for i in range(hr_r_idx + 1, min(hr_r_idx + 10, len(data))):
+                                    row = data[i]
+                                    if hr_c_idx < len(row) and search_str in str(row[hr_c_idx]).upper():
+                                        secs = zones.get(z, 0.0)
+                                        h, m = divmod(int(secs), 3600)
+                                        m, s = divmod(m, 60)
+                                        time_str = f"{h:02d}:{m:02d}:{s:02d}"
+                                        
+                                        target_c = hr_c_idx + 2
+                                        queue_update(f"Strefa {z} Time", time_str, i, target_c - c_idx)
+                                        break
+                                        
             if batch_updates:
                 try:
-                    ws.batch_update(batch_updates)
+                    ws.batch_update(batch_updates, value_input_option='USER_ENTERED')
                     print(f"✅ Applied {len(batch_updates)} updates to worksheet '{ws.title}'")
                 except Exception as e:
                     print(f"❌ Failed to batch update {ws.title}: {e}")
@@ -449,12 +481,9 @@ def fetch_race_predictions(api, start_date, end_date):
         print(f"Failed to fetch race predictions: {e}")
     return formatted_preds
 
-def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
-    """Fetch HR zone time for each activity and print aggregated times for the [start_date, end_date] interval."""
-    print("\n--------------------------------------------------")
-    print(f"Fetching heart rate zone data for activities between {start_date.isoformat()} and {end_date.isoformat()} (inclusive)...")
-    
-    # Initialize aggregated seconds for zones 1 to 5
+_HR_ZONE_CACHE = {}
+
+def get_aggregated_hr_zones(api, training_data, start_date, end_date, quiet=False):
     aggregated_zones = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
     has_hr_data = False
 
@@ -468,20 +497,23 @@ def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
             continue
             
         try:
-            # Extract date part e.g. "2026-05-17" from "2026-05-17 09:32:21"
             act_date = datetime.datetime.strptime(start_time_str[:10], "%Y-%m-%d").date()
         except ValueError:
             continue
             
-        # Check if activity falls within the inclusive interval
         if not (start_date <= act_date <= end_date):
             continue
             
-        print(f"Fetching HR zones for '{act_name}' ({act_type}) on {start_time_str}...")
+        if not quiet:
+            print(f"Fetching HR zones for '{act_name}' ({act_type}) on {start_time_str}...")
         try:
-            hr_zones = api.get_activity_hr_in_timezones(act_id)
+            if act_id not in _HR_ZONE_CACHE:
+                _HR_ZONE_CACHE[act_id] = api.get_activity_hr_in_timezones(act_id)
+                
+            hr_zones = _HR_ZONE_CACHE[act_id]
             if hr_zones:
-                print(f"  Data retrieved: {len(hr_zones)} zones found.")
+                if not quiet:
+                    print(f"  Data retrieved: {len(hr_zones)} zones found.")
                 for zone in hr_zones:
                     z_num = zone.get("zoneNumber")
                     secs = zone.get("secsInZone", 0.0)
@@ -490,14 +522,19 @@ def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
                         if secs > 0:
                             has_hr_data = True
             else:
-                print("  No HR zone data found for this activity.")
+                if not quiet:
+                    print("  No HR zone data found for this activity.")
         except Exception as e:
-            print(f"  Could not retrieve HR zones: {e}")
+            if not quiet:
+                print(f"  Could not retrieve HR zones: {e}")
 
+    return aggregated_zones if has_hr_data else None
+
+def print_hr_zones(aggregated_zones, start_date, end_date):
     print("\n==================================================")
     print(f"AGGREGATED HEART RATE ZONES FROM {start_date.isoformat()} TO {end_date.isoformat()}")
     print("==================================================")
-    if has_hr_data:
+    if aggregated_zones:
         total_active_secs = sum(aggregated_zones.values())
         for z_num in sorted(aggregated_zones.keys(), reverse=True):
             total_secs = aggregated_zones[z_num]
@@ -523,6 +560,15 @@ def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
     else:
         print("  No heart rate zone data recorded in the exercises during this period.")
     print("==================================================")
+
+def fetch_and_print_hr_zones(api, training_data, start_date, end_date):
+    """Fetch HR zone time for each activity and print aggregated times for the [start_date, end_date] interval."""
+    print("\n--------------------------------------------------")
+    print(f"Fetching heart rate zone data for activities between {start_date.isoformat()} and {end_date.isoformat()} (inclusive)...")
+    
+    zones = get_aggregated_hr_zones(api, training_data, start_date, end_date)
+    print_hr_zones(zones, start_date, end_date)
+    return zones
 
 def main():
     parser = argparse.ArgumentParser(description="Sync Garmin data to Google Sheets")
@@ -584,9 +630,22 @@ def main():
     if hr_start and hr_end:
         fetch_and_print_hr_zones(api, all_training_data, hr_start, hr_end)
 
+    # Calculate weekly HR zones for Google Sheets export
+    weekly_hr_zones_data = {}
+    curr = fetch_start
+    while curr <= fetch_end:
+        if curr.weekday() == 6: # Sunday
+            monday = curr - datetime.timedelta(days=6)
+            if monday >= fetch_start:
+                # We have a full week
+                zones = get_aggregated_hr_zones(api, all_training_data, monday, curr, quiet=True)
+                if zones:
+                    weekly_hr_zones_data[curr.isoformat()] = zones
+        curr += datetime.timedelta(days=1)
+
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     if spreadsheet_id:
-        export_to_google_sheets(spreadsheet_id, all_sleep_data, all_training_data, status_data, formatted_preds)
+        export_to_google_sheets(spreadsheet_id, all_sleep_data, all_training_data, status_data, formatted_preds, weekly_hr_zones_data)
     else:
         print("⚠️ SPREADSHEET_ID env var is missing. Skipping Google Sheets export.")
 

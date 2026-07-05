@@ -9,6 +9,7 @@ This script automates the synchronization of health, training, and race predicti
 - **Training Status**: Syncs your overall training status (e.g., Peaking, Productive, Strained) for both "PRZED" and "PO" columns.
 - **Activity Aggregation**: Sums distance, duration, and training load for multiple activities of the same type on a single day.
 - **Health Metrics**: Exports HRV, resting heart rate, and sleep hours (in H:MM format).
+- **Weekly HR Zones**: Automatically aggregates your heart rate zones across all activities for every completed week and updates the corresponding "Strefa tętna" block.
 - **Activity Links**: Adds a link to the first Garmin activity of the day under "LINK Z ZEGARKA".
 - **Safe Updates**: Only writes data to empty cells (or cells containing placeholder zeros like `0:00:00` or `0,0`) to avoid overwriting manual adjustments.
 

@@ -13,6 +13,7 @@ from main import (
     fetch_training_data,
     fetch_training_status,
     fetch_race_predictions,
+    get_aggregated_hr_zones,
 )
 
 def test_hours_to_time_str():
@@ -161,6 +162,46 @@ def test_fetch_race_predictions():
         "Marathon": "03:10:00"
     }
 
+def test_get_aggregated_hr_zones():
+    main._HR_ZONE_CACHE.clear()
+    api = Mock()
+    api.get_activity_hr_in_timezones.return_value = [
+        {"zoneNumber": 1, "secsInZone": 600},
+        {"zoneNumber": 2, "secsInZone": 1200},
+        {"zoneNumber": 3, "secsInZone": 300},
+    ]
+
+    training_data = [
+        {"activityId": 111, "startTime": "2026-07-05 10:00:00", "activityName": "Run"},
+        {"activityId": 222, "startTime": "2026-07-06 10:00:00", "activityName": "Bike"} # outside date range
+    ]
+
+    start_date = datetime.date(2026, 7, 1)
+    end_date = datetime.date(2026, 7, 5)
+
+    zones = get_aggregated_hr_zones(api, training_data, start_date, end_date)
+
+    assert zones is not None
+    assert zones[1] == 600
+    assert zones[2] == 1200
+    assert zones[3] == 300
+    assert zones[4] == 0
+    assert zones[5] == 0
+    
+    api.get_activity_hr_in_timezones.assert_called_once_with(111)
+
+def test_get_aggregated_hr_zones_empty():
+    main._HR_ZONE_CACHE.clear()
+    api = Mock()
+    training_data = []
+    
+    start_date = datetime.date(2026, 7, 1)
+    end_date = datetime.date(2026, 7, 5)
+
+    zones = get_aggregated_hr_zones(api, training_data, start_date, end_date)
+    assert zones is None
+
+@patch("main.get_aggregated_hr_zones")
 @patch("main.fetch_and_print_hr_zones")
 @patch("main.fetch_race_predictions")
 @patch("main.fetch_training_status")
@@ -168,8 +209,10 @@ def test_fetch_race_predictions():
 @patch("main.fetch_sleep_data")
 @patch("main.init_api")
 @patch("main.os.getenv")
+@patch("main.export_to_google_sheets")
 @patch("main.sys.argv", ["main.py"])
 def test_main_weekly_hr_zones(
+    mock_export,
     mock_getenv,
     mock_init_api,
     mock_fetch_sleep,
@@ -177,6 +220,7 @@ def test_main_weekly_hr_zones(
     mock_fetch_status,
     mock_fetch_race,
     mock_fetch_hr,
+    mock_get_aggregated_hr_zones,
 ):
     # Setup mocks
     mock_getenv.return_value = "dummy"
@@ -186,6 +230,8 @@ def test_main_weekly_hr_zones(
     mock_training_data = []
     mock_fetch_training.return_value = mock_training_data
     
+    mock_get_aggregated_hr_zones.return_value = {1: 100, 2: 200, 3: 0, 4: 0, 5: 0}
+    
     class MockDate(datetime.date):
         @classmethod
         def today(cls):
@@ -194,7 +240,7 @@ def test_main_weekly_hr_zones(
     with patch("main.datetime.date", MockDate):
         main.main()
         
-    # We expect 2 calls to fetch_and_print_hr_zones
+    # We expect 2 calls to fetch_and_print_hr_zones (prev week and current week)
     assert mock_fetch_hr.call_count == 2
     
     # Check args for previous week
@@ -210,4 +256,20 @@ def test_main_weekly_hr_zones(
     assert call2_args[1] == mock_training_data
     assert call2_args[2] == datetime.date(2026, 7, 6) # Monday current week
     assert call2_args[3] == datetime.date(2026, 7, 8) # Today
+    
+    # Check full week logic for Google Sheets export
+    # fetch_start is adjusted to prev_week_start which is 2026-06-29
+    # fetch_end is today which is 2026-07-08
+    # Sundays between 2026-06-29 and 2026-07-08 are: 2026-07-05
+    # Monday for that Sunday is 2026-06-29 >= fetch_start
+    # So we expect 1 call to get_aggregated_hr_zones for 2026-06-29 to 2026-07-05
+    
+    mock_get_aggregated_hr_zones.assert_called_once_with(
+        api_mock, mock_training_data, datetime.date(2026, 6, 29), datetime.date(2026, 7, 5), quiet=True
+    )
+    
+    # Verify export_to_google_sheets was called with the correct weekly_hr_zones
+    assert mock_export.call_count == 1
+    export_args = mock_export.call_args_list[0][0]
+    assert export_args[5] == {"2026-07-05": {1: 100, 2: 200, 3: 0, 4: 0, 5: 0}}
 
