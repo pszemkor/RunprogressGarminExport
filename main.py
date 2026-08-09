@@ -158,13 +158,45 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                     if act.get("startTime", "").startswith(date_str):
                         t = act.get("activityType", "other")
                         if t not in daily_activities:
-                            daily_activities[t] = {"distance": 0, "duration": 0, "load": 0}
+                            daily_activities[t] = {"distance": 0, "duration": 0, "load": 0, "rpe": None}
                         daily_activities[t]["distance"] += act.get("distanceKm") or 0
                         daily_activities[t]["duration"] += act.get("durationMinutes") or 0
                         daily_activities[t]["load"] += act.get("trainingLoad") or 0
+                        
+                        act_rpe = act.get("rpe")
+                        if act_rpe is not None:
+                            curr_rpe = daily_activities[t].get("rpe")
+                            if curr_rpe is None or act_rpe > curr_rpe:
+                                daily_activities[t]["rpe"] = act_rpe
+                                
                         act_id = act.get("activityId")
                         if act_id:
                             daily_activity_links.append(f"https://connect.garmin.com/app/activity/{act_id}")
+
+                # Determine subjective feel for the day based on precedence rules
+                # 1. Activities with a 'feel' score
+                # 2. 'running' > other types
+                # 3. Higher duration > lower duration
+                day_feel_score = None
+                day_feel_acts = [act for act in training_data if act.get("startTime", "").startswith(date_str) and act.get("feel") is not None]
+                if day_feel_acts:
+                    def sort_key(a):
+                        is_running = a.get("activityType") == "running"
+                        dur = a.get("durationMinutes") or 0
+                        return (is_running, dur)
+                    day_feel_acts.sort(key=sort_key, reverse=True)
+                    day_feel_score = day_feel_acts[0].get("feel")
+                
+                day_feel_str = None
+                if day_feel_score is not None:
+                    _FEEL_MAP = {
+                        100: "great 😄",
+                        75: "good 🙂",
+                        50: "normal 😐",
+                        25: "poor 😕",
+                        0: "terrible 😩"
+                    }
+                    day_feel_str = _FEEL_MAP.get(day_feel_score)
 
                 # Track what we've updated for this day block to ensure we don't over-write if we scan too far
                 updated_preds = {"PRZED": set(), "PO": set()}
@@ -189,7 +221,7 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                     # Helper function to check if cell is effectively empty (including placeholder zeros)
                     def is_empty(col_offset):
                         c_str = str(row[c_idx+col_offset]).strip() if (c_idx+col_offset) < len(row) else ""
-                        return c_str == "" or c_str in ["0", "0.0", "0,0", "0:00", "0:00:00", "0.00", "0,00", "-"]
+                        return c_str == "" or c_str in ["0", "0.0", "0,0", "0:00", "0:00:00", "0.00", "0,00", "-", "0. Rest"]
 
                     def queue_update(label, val, row_idx, col_offset):
                         a1_range = gspread.utils.rowcol_to_a1(row_idx+1, c_idx+col_offset+1)
@@ -207,6 +239,19 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                         if val and is_empty(5):
                             queue_update("PO Status", val, i, 5)
                         updated_health.add("STATUS_PO")
+
+                    # 1.5 Subjective Feel
+                    if "JAK OCENIASZ SWOJE SAMOPOCZUCIE" in c_val and "FEEL" not in updated_health:
+                        # The label spans offsets 0-3 (V-Y), and the dropdown spans offsets 4-5 (Z-AA).
+                        # The top-left cell of the dropdown merge is offset 4.
+                        if day_feel_str and is_empty(4):
+                            queue_update("Samopoczucie", day_feel_str, i, 4)
+                        # Fallbacks just in case the merge is different
+                        elif day_feel_str and is_empty(3):
+                            queue_update("Samopoczucie", day_feel_str, i, 3)
+                        elif day_feel_str and is_empty(5):
+                            queue_update("Samopoczucie", day_feel_str, i, 5)
+                        updated_health.add("FEEL")
 
                     # 2. Race Predictions (PRZED = c_idx, PO = c_idx+2)
                     # Use a more flexible string matching by removing spaces
@@ -238,20 +283,45 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                             d, act_mapped, act_name = daily_activities.get("yoga"), True, "JOGA"
                         elif "INNE" in c_val and "INNE" not in updated_acts:
                             other_keys = [k for k in daily_activities.keys() if k not in ["running", "cycling", "walking", "swimming", "yoga"]]
-                            d = {"distance": 0, "duration": 0, "load": 0}
+                            d = {"distance": 0, "duration": 0, "load": 0, "rpe": None}
                             for k in other_keys:
                                 d["distance"] += daily_activities[k]["distance"]
                                 d["duration"] += daily_activities[k]["duration"]
                                 d["load"] += daily_activities[k]["load"]
+                                
+                                k_rpe = daily_activities[k].get("rpe")
+                                if k_rpe is not None:
+                                    if d["rpe"] is None or k_rpe > d["rpe"]:
+                                        d["rpe"] = k_rpe
+                                        
                             if d["duration"] == 0: d = None
                             act_mapped, act_name = True, "INNE"
 
                         if act_mapped and d:
                             updated_acts.add(act_name)
-                            if d["distance"] > 0 and is_empty(1):
+                            if d["distance"] > 0 and is_empty(2):
                                 queue_update(f"{act_name} Distance", round(d["distance"], 2), i, 2)
-                            if d["duration"] > 0 and is_empty(2):
+                            if d["duration"] > 0 and is_empty(3):
                                 queue_update(f"{act_name} Duration", round(d["duration"], 2), i, 3)
+                                
+                            if d.get("rpe") is not None and is_empty(4):
+                                _RPE_MAP = {
+                                    0: "0. Rest",
+                                    10: "1. Very, very easy",
+                                    20: "2. Easy",
+                                    30: "3. Moderate",
+                                    40: "4. Somewhat hard",
+                                    50: "5. Hard",
+                                    60: "6. Really hard",
+                                    70: "7. Very hard",
+                                    80: "8. Extremely hard",
+                                    90: "9. Almost maximum",
+                                    100: "10. Maximum"
+                                }
+                                rpe_str = _RPE_MAP.get(d["rpe"])
+                                if rpe_str:
+                                    queue_update(f"{act_name} RPE", rpe_str, i, 4)
+                                    
                             if d["load"] > 0 and is_empty(5):
                                 queue_update(f"{act_name} Load", round(d["load"], 2), i, 5)
                             else: 
@@ -389,9 +459,21 @@ def fetch_training_data(api, start_date, end_date):
             distance_km = round((act.get("distance") or 0) / 1000.0, 2)
             
             train_load = act.get("activityTrainingLoad")
+            act_id = act.get("activityId")
+            
+            feel = None
+            rpe = None
+            if act_id:
+                try:
+                    details = api.garth.connectapi(f"/activity-service/activity/{act_id}")
+                    summary = details.get("summaryDTO", {})
+                    feel = summary.get("directWorkoutFeel")
+                    rpe = summary.get("directWorkoutRpe")
+                except Exception:
+                    pass
             
             act_info = {
-                "activityId": act.get("activityId"),
+                "activityId": act_id,
                 "activityName": act.get("activityName"),
                 "activityType": act.get("activityType", {}).get("typeKey"),
                 "startTime": act.get("startTimeLocal"),
@@ -400,7 +482,9 @@ def fetch_training_data(api, start_date, end_date):
                 "calories": act.get("calories"),
                 "averageHeartRate": act.get("averageHR"),
                 "trainingLoad": round(train_load, 2) if train_load is not None else None,
-                "trainingEffect": act.get("trainingEffectLabel")
+                "trainingEffect": act.get("trainingEffectLabel"),
+                "feel": feel,
+                "rpe": rpe
             }
             all_training_data.append(act_info)
             

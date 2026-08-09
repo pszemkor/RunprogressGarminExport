@@ -11,6 +11,8 @@ This script automates the synchronization of health, training, and race predicti
 - **Health Metrics**: Exports HRV, resting heart rate, and sleep hours (in H:MM format).
 - **Weekly HR Zones**: Automatically aggregates your heart rate zones across all activities for every completed week and updates the corresponding "Strefa tętna" block.
 - **Activity Links**: Adds a link to the first Garmin activity of the day under "LINK Z ZEGARKA".
+- **Subjective Feel**: Extracts how you felt during your primary activity (RPE/Feel) and maps it to your spreadsheet's emojis (e.g. `great 😄`, `poor 😕`).
+- **Activity RPE**: Extracts the Rate of Perceived Exertion (RPE) on a scale of 1-10 for each individual activity type and pushes it to the spreadsheet's dropdown.
 - **Safe Updates**: Only writes data to empty cells (or cells containing placeholder zeros like `0:00:00` or `0,0`) to avoid overwriting manual adjustments.
 
 ## Prerequisites
