@@ -8,13 +8,22 @@ import os
 import sys
 from getpass import getpass
 
-from garth.exc import GarthException, GarthHTTPError
-from garminconnect import (
-    Garmin,
-    GarminConnectAuthenticationError,
-    GarminConnectConnectionError,
-    GarminConnectTooManyRequestsError,
-)
+try:
+    from garth.exc import GarthException, GarthHTTPError
+    from garminconnect import (
+        Garmin,
+        GarminConnectAuthenticationError,
+        GarminConnectConnectionError,
+        GarminConnectTooManyRequestsError,
+    )
+except ImportError:
+    # Allows execution in environments (e.g. Personal API mode) where garminconnect/garth are not used
+    GarthException = None
+    GarthHTTPError = None
+    Garmin = None
+    GarminConnectAuthenticationError = None
+    GarminConnectConnectionError = None
+    GarminConnectTooManyRequestsError = None
 
 def get_mfa() -> str:
     """Get MFA token."""
@@ -22,6 +31,8 @@ def get_mfa() -> str:
 
 def init_api(email: str | None = None, password: str | None = None, tokenstore: str = "~/.garminconnect") -> Garmin | None:
     """Initialize Garmin API with smart error handling and recovery."""
+    if Garmin is None:
+        raise ImportError("garminconnect and garth must be installed to use the unofficial Garmin API.")
     tokenstore = os.path.expanduser(tokenstore)
 
     # First try to login with stored tokens
@@ -93,12 +104,6 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
         print("💡 Please run 'pip install gspread google-auth' to enable Google Sheets export.")
         return
 
-    creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if not creds_path or not os.path.exists(creds_path):
-        print("⚠️ GOOGLE_APPLICATION_CREDENTIALS env var is missing or invalid. Skipping Google Sheets export.")
-        print("   Set it to the path of your Service Account JSON file.")
-        return
-
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -107,7 +112,14 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
     print(f"\n--------------------------------------------------")
     print(f"Exporting data to Forma Google Spreadsheet: {spreadsheet_id}...")
     try:
-        creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+        creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if creds_path and os.path.exists(creds_path):
+            creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+        else:
+            # Fall back to Google Application Default Credentials (standard in GCP Cloud Functions / Cloud Run)
+            import google.auth
+            creds, _ = google.auth.default(scopes=scopes)
+
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(spreadsheet_id)
         
@@ -392,7 +404,10 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
         print("✅ Finished updating Google Sheets!")
 
     except Exception as e:
-        print(f"❌ Failed to export to Google Sheets: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"❌ Failed to export to Google Sheets: {type(e).__name__}: {repr(e)}")
+        print("💡 Hint: Ensure the Google Spreadsheet is shared with the runner service account as 'Editor'.")
 
 def hours_to_time_str(decimal_hours: float) -> str:
     """Convert decimal hours (e.g. 5.77) to H:MM string (e.g. '5:46')."""
@@ -591,10 +606,16 @@ def get_aggregated_hr_zones(api, training_data, start_date, end_date, quiet=Fals
         if not quiet:
             print(f"Fetching HR zones for '{act_name}' ({act_type}) on {start_time_str}...")
         try:
-            if act_id not in _HR_ZONE_CACHE:
-                _HR_ZONE_CACHE[act_id] = api.get_activity_hr_in_timezones(act_id)
-                
-            hr_zones = _HR_ZONE_CACHE[act_id]
+            # Check if HR zones are already pre-attached (e.g. from Personal API)
+            hr_zones = act.get("hrZones")
+            if hr_zones is None:
+                if act_id not in _HR_ZONE_CACHE:
+                    if hasattr(api, "get_activity_hr_in_timezones"):
+                        _HR_ZONE_CACHE[act_id] = api.get_activity_hr_in_timezones(act_id)
+                    else:
+                        _HR_ZONE_CACHE[act_id] = None
+                hr_zones = _HR_ZONE_CACHE[act_id]
+
             if hr_zones:
                 if not quiet:
                     print(f"  Data retrieved: {len(hr_zones)} zones found.")
@@ -659,16 +680,54 @@ def main():
     parser.add_argument("--days", type=int, default=7, help="Number of past days to sync (default: 7)")
     parser.add_argument("--hr-start", type=str, help="Start date for aggregated heart rate zones (YYYY-MM-DD)")
     parser.add_argument("--hr-end", type=str, help="End date for aggregated heart rate zones (YYYY-MM-DD)")
+    parser.add_argument(
+        "--use-personal-api",
+        action="store_true",
+        default=os.getenv("USE_PERSONAL_API", "").lower() in ("1", "true", "yes"),
+        help="Use official Garmin Connect Personal API instead of garminconnect library",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=os.getenv("GARMIN_PERSONAL_API_KEY"),
+        help="Garmin Connect Personal API key (can also be set via GARMIN_PERSONAL_API_KEY env var)",
+    )
     args = parser.parse_args()
 
-    email = os.getenv("EMAIL")
-    password = os.getenv("PASSWORD")
-    tokenstore = os.getenv("GARMINTOKENS") or "~/.garminconnect"
+    api = None
+    personal_client = None
 
-    api = init_api(email, password, tokenstore)
-    if not api:
-        print("Failed to initialize Garmin API")
-        sys.exit(1)
+    if args.use_personal_api:
+        from personal_api import (
+            GarminPersonalApiClient,
+            fetch_sleep_data_personal,
+            fetch_training_data_personal,
+        )
+
+        api_key = args.api_key or os.getenv("GARMIN_PERSONAL_API_KEY")
+        if not api_key:
+            print("❌ --use-personal-api requires a Personal API key via --api-key or GARMIN_PERSONAL_API_KEY env var.")
+            sys.exit(1)
+
+        print("🔑 Initializing Garmin Connect Personal API client...")
+        try:
+            personal_client = GarminPersonalApiClient(api_key=api_key)
+            # Verify credentials eagerly
+            personal_client.get_token()
+            api = personal_client
+            print("✅ Successfully authenticated with Garmin Personal API!")
+        except Exception as e:
+            print(f"❌ Failed to authenticate with Garmin Personal API: {e}")
+            sys.exit(1)
+    else:
+        email = os.getenv("EMAIL")
+        password = os.getenv("PASSWORD")
+        tokenstore = os.getenv("GARMINTOKENS") or "~/.garminconnect"
+
+        api = init_api(email, password, tokenstore)
+        if not api:
+            print("Failed to initialize Garmin API")
+            sys.exit(1)
 
     today = datetime.date.today()
     start_date = today - datetime.timedelta(days=args.days)
@@ -701,10 +760,20 @@ def main():
     if prev_week_start < fetch_start:
         fetch_start = prev_week_start
     
-    all_sleep_data = fetch_sleep_data(api, today, days=args.days)
-    all_training_data = fetch_training_data(api, fetch_start, fetch_end)
-    status_data = fetch_training_status(api, today, days=args.days)
-    formatted_preds = fetch_race_predictions(api, start_date, today)
+    if args.use_personal_api:
+        from personal_api import fetch_sleep_data_personal, fetch_training_data_personal
+
+        all_sleep_data = fetch_sleep_data_personal(personal_client, today, days=args.days)
+        all_training_data = fetch_training_data_personal(personal_client, fetch_start, fetch_end)
+        print("\n⚠️ Note: Training Status and Race Predictions are not available in Garmin Personal API.")
+        print("   The spreadsheet cells for these metrics will remain empty.")
+        status_data = {}
+        formatted_preds = {}
+    else:
+        all_sleep_data = fetch_sleep_data(api, today, days=args.days)
+        all_training_data = fetch_training_data(api, fetch_start, fetch_end)
+        status_data = fetch_training_status(api, today, days=args.days)
+        formatted_preds = fetch_race_predictions(api, start_date, today)
 
     # Always fetch and print heart rate zones for previous week and current week
     fetch_and_print_hr_zones(api, all_training_data, prev_week_start, prev_week_end)
@@ -735,3 +804,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Export Cloud Functions HTTP handler so GCP default source (/workspace/main.py) finds it
+try:
+    from function_entry import sync_garmin_http, run_sync
+except ImportError:
+    pass
+

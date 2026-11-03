@@ -1,4 +1,7 @@
 garminconnect
+garth
 cloudscraper
 gspread
 google-auth
+requests
+functions-framework>=3.0.0

@@ -34,38 +34,68 @@ The script uses environment variables for configuration. You can set these in yo
 
 | Variable | Description |
 | :--- | :--- |
-| `EMAIL` | Your Garmin Connect email |
-| `PASSWORD` | Your Garmin Connect password |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Absolute path to your Service Account JSON key file |
+| `GARMIN_PERSONAL_API_KEY` | Official Garmin Connect Personal API key (when using Personal API mode) |
+| `USE_PERSONAL_API` | Set to `true` or `1` to default to Personal API instead of `garminconnect` |
+| `EMAIL` | Your Garmin Connect email (for `garminconnect` library mode) |
+| `PASSWORD` | Your Garmin Connect password (for `garminconnect` library mode) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Absolute path to your Service Account JSON key file (optional on GCP) |
 | `SPREADSHEET_ID` | The ID of your Google Sheet (found in the URL) |
 | `GARMINTOKENS` | (Optional) Path to store Garmin session tokens (defaults to `~/.garminconnect`) |
 
 ## Installation
 
-1.  Clone this repository.
-2.  Install the required Python packages:
+1. Clone this repository.
+2. Install dependencies:
 
 ```bash
-pip install gspread google-auth garminconnect cloudscraper garth
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-Run the script using Python:
+### 1. Using Official Garmin Personal API (Recommended for Cloud & Automation)
+Obtain your personal API key from [Garmin Connect Personal API](https://connect.garmin.com/app/settings/personalApiToken).
+
+```bash
+# Via flag and env var:
+export GARMIN_PERSONAL_API_KEY="your-api-key"
+python3 main.py --use-personal-api --days 7
+
+# Or pass key directly:
+python3 main.py --use-personal-api --api-key "your-api-key" --days 7
+```
+
+> **Note on Personal API coverage**: The official Personal API currently provides activities (with training load, duration, distance, subjective feel/RPE, and time-in-zones), sleep, resting heart rate, and overnight HRV. It does not expose Training Status or Race Predictions; those cells will remain empty.
+
+### 2. Using garminconnect Python Library (Default)
 
 ```bash
 # Sync data for the default 7 past days
 python3 main.py
 
-# Sync data for a specific number of past days (e.g., last 14 days)
+# Sync data for a specific number of past days
 python3 main.py --days 14
 ```
 
-The script will:
-1.  Log in to Garmin Connect.
-2.  Fetch sleep, activity, training status, and race prediction data for the specified number of days (default: 7).
-3.  Scan your Google Sheet worksheets for matching dates.
-4.  Populate the data into the correct cells, providing detailed logs in the terminal.
+## Google Cloud Platform Deployment (Cloud Functions + Cloud Build)
+
+This repo is configured for automated deployment to **Google Cloud Functions (gen2)** triggered every night at **23:00 Polish time** (Europe/Warsaw) via **Cloud Scheduler**.
+
+### Quick Deployment via Script
+```bash
+export PROJECT_ID="garminsync-491522"
+export GARMIN_PERSONAL_API_KEY="your-api-key"
+./deploy_gcp.sh
+```
+
+### Cloud Build CI/CD Integration
+The included `cloudbuild.yaml` runs tests and deploys the Cloud Function automatically:
+
+```bash
+gcloud builds submit --config=cloudbuild.yaml
+```
+
+Remember to grant **Editor** access on your Google Sheet to the Cloud Function's runtime service account (`garmin-sync-runner@garminsync-491522.iam.gserviceaccount.com`).
 
 ## Template Sensitivity
 

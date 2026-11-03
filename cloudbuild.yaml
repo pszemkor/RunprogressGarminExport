@@ -1,0 +1,37 @@
+steps:
+  # 1. Run unit tests
+  - name: 'python:3.12-slim'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --no-cache-dir -r requirements.txt pytest
+        pytest test_main.py test_personal_api.py
+
+  # 2. Deploy Cloud Function (gen2)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'functions'
+      - 'deploy'
+      - '$_FUNCTION_NAME'
+      - '--gen2'
+      - '--runtime=python312'
+      - '--region=$_REGION'
+      - '--source=.'
+      - '--entry-point=sync_garmin_http'
+      - '--trigger-http'
+      - '--no-allow-unauthenticated'
+      - '--timeout=540s'
+      - '--memory=512Mi'
+      - '--set-env-vars=USE_PERSONAL_API=true,SPREADSHEET_ID=$_SPREADSHEET_ID'
+      - '--set-secrets=GARMIN_PERSONAL_API_KEY=$_GARMIN_API_KEY_SECRET:latest'
+
+substitutions:
+  _FUNCTION_NAME: 'garmin-sync'
+  _REGION: 'europe-central2'
+  _SPREADSHEET_ID: '1r20OoEoFyaAEcm3K-1GfzGCLxc6zk3FqGg823S7xYlA'
+  _GARMIN_API_KEY_SECRET: 'garmin-personal-api-key'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
