@@ -8,7 +8,10 @@ from main import (
     hours_to_time_str,
     format_time,
     device_data_phrase_format,
+    normalize_activity_type,
+    format_rpe,
     normalize_training_status,
+    export_to_google_sheets,
     fetch_sleep_data,
     fetch_training_data,
     fetch_training_status,
@@ -272,4 +275,181 @@ def test_main_weekly_hr_zones(
     assert mock_export.call_count == 1
     export_args = mock_export.call_args_list[0][0]
     assert export_args[5] == {"2026-07-05": {1: 100, 2: 200, 3: 0, 4: 0, 5: 0}}
+
+
+def test_normalize_activity_type():
+    assert normalize_activity_type("running") == "running"
+    assert normalize_activity_type("treadmill_running") == "running"
+    assert normalize_activity_type("trail_running") == "running"
+    assert normalize_activity_type("virtual_ride") == "cycling"
+    assert normalize_activity_type("indoor_cycling") == "cycling"
+    assert normalize_activity_type("cycling") == "cycling"
+    assert normalize_activity_type("strength_training") == "strength_training"
+    assert normalize_activity_type(None) == "other"
+    assert normalize_activity_type("") == "other"
+
+
+def test_format_rpe():
+    assert format_rpe(20) == "2. Easy"
+    assert format_rpe(40.0) == "4. Somewhat hard"
+    assert format_rpe("30") == "3. Moderate"
+    assert format_rpe(0) == "0. Rest"
+    assert format_rpe(None) is None
+    assert format_rpe(False) is None
+    assert format_rpe(25) is None
+
+
+def _run_export_with_day_sheet(monkeypatch, date_str, training_data, rows=None):
+    """Run export_to_google_sheets against a minimal single-day worksheet mock."""
+    import gspread
+    import google.auth
+
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    default_rows = rows or [
+        [date_str, "", "", "", "", ""],
+        ["JAK OCENIASZ SWOJE SAMOPOCZUCIE", "", "", "", "", ""],
+        ["RODZAJ AKTYWNOŚCI", "", "", "", "", ""],
+        ["BIEG 🏃", "", "", "", "0. Rest", ""],
+        ["ROWER 🚲", "", "", "", "0. Rest", ""],
+        ["SPACER 🚶", "", "", "", "0. Rest", ""],
+        ["PŁYWANIE 🏊", "", "", "", "0. Rest", ""],
+        ["JOGA 🧘", "", "", "", "0. Rest", ""],
+        ["INNE 💪", "", "", "", "0. Rest", ""],
+    ]
+
+    ws = Mock()
+    ws.title = "TestWeek"
+    ws.get_all_values.return_value = default_rows
+
+    spreadsheet = Mock()
+    spreadsheet.worksheets.return_value = [ws]
+
+    client = Mock()
+    client.open_by_key.return_value = spreadsheet
+
+    with patch.object(google.auth, "default", return_value=(Mock(), "proj")), \
+         patch.object(gspread, "authorize", return_value=client):
+        export_to_google_sheets(
+            spreadsheet_id="sheet-123",
+            sleep_data={date_str: {}},
+            training_data=training_data,
+            status_data={},
+            preds_data={},
+        )
+
+    assert ws.batch_update.call_count == 1
+    updates = ws.batch_update.call_args[0][0]
+    return {item["range"]: item["values"][0][0] for item in updates}
+
+
+def test_export_treadmill_mapped_to_bieg_with_rpe_and_feel_precedence(monkeypatch):
+    training_data = [
+        {
+            "activityId": 101,
+            "activityType": "treadmill_running",
+            "startTime": "2026-11-08 10:00:00",
+            "distanceKm": 7.5,
+            "durationMinutes": 42.0,
+            "trainingLoad": 85.4,
+            "feel": 75,
+            "rpe": 20,
+        },
+        {
+            "activityId": 102,
+            "activityType": "strength_training",
+            "startTime": "2026-11-08 12:00:00",
+            "distanceKm": 0.0,
+            "durationMinutes": 60.0,
+            "trainingLoad": 30.0,
+            "feel": 50,
+            "rpe": 30,
+        },
+    ]
+
+    updated = _run_export_with_day_sheet(monkeypatch, "2026-11-08", training_data)
+
+    # Treadmill counted in BIEG (row 4: C4=Dist, D4=Dur, E4=RPE, F4=Load)
+    assert updated["C4"] == 7.5
+    assert updated["D4"] == 42.0
+    assert updated["E4"] == "2. Easy"
+    assert updated["F4"] == 85.4
+    # Treadmill gets running precedence over longer strength_training for Samopoczucie (E2)
+    assert updated["E2"] == "good 🙂"
+    # Strength training stays in INNE (row 9), without absorbing treadmill metrics
+    assert updated["D9"] == 60.0
+    assert updated["E9"] == "3. Moderate"
+    assert updated["F9"] == 30.0
+    assert "C9" not in updated
+
+
+def test_export_virtual_ride_and_indoor_cycling_mapped_to_rower(monkeypatch):
+    training_data = [
+        {
+            "activityId": 201,
+            "activityType": "virtual_ride",
+            "startTime": "2026-11-07 09:00:00",
+            "distanceKm": 25.0,
+            "durationMinutes": 45.0,
+            "trainingLoad": 70.0,
+            "feel": None,
+            "rpe": 20,
+        },
+        {
+            "activityId": 202,
+            "activityType": "indoor_cycling",
+            "startTime": "2026-11-07 17:00:00",
+            "distanceKm": 15.0,
+            "durationMinutes": 30.0,
+            "trainingLoad": 40.5,
+            "feel": None,
+            "rpe": 40,
+        },
+    ]
+
+    updated = _run_export_with_day_sheet(monkeypatch, "2026-11-07", training_data)
+
+    # Combined into ROWER (row 5: C5=Dist, D5=Dur, E5=max RPE, F5=Load)
+    assert updated["C5"] == 40.0
+    assert updated["D5"] == 75.0
+    assert updated["E5"] == "4. Somewhat hard"
+    assert updated["F5"] == 110.5
+    # Neither leaks into INNE (row 9)
+    assert "C9" not in updated
+    assert "D9" not in updated
+    assert "E9" not in updated
+    assert "F9" not in updated
+
+
+def test_export_combines_outdoor_and_treadmill_running(monkeypatch):
+    training_data = [
+        {
+            "activityId": 301,
+            "activityType": "running",
+            "startTime": "2026-11-10 07:00:00",
+            "distanceKm": 5.0,
+            "durationMinutes": 25.0,
+            "trainingLoad": 60.0,
+            "feel": None,
+            "rpe": 20.0,
+        },
+        {
+            "activityId": 302,
+            "activityType": "treadmill_running",
+            "startTime": "2026-11-10 18:00:00",
+            "distanceKm": 4.25,
+            "durationMinutes": 22.5,
+            "trainingLoad": 55.25,
+            "feel": None,
+            "rpe": 30,
+        },
+    ]
+
+    updated = _run_export_with_day_sheet(monkeypatch, "2026-11-10", training_data)
+
+    assert updated["C4"] == 9.25
+    assert updated["D4"] == 47.5
+    assert updated["E4"] == "3. Moderate"
+    assert updated["F4"] == 115.25
+    assert "D9" not in updated
+
 

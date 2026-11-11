@@ -257,19 +257,28 @@ def fetch_training_data_personal(
             act_type = str(act_type_obj) if act_type_obj else "other"
 
         # Direct feel and RPE might be on the activity or detail summary
+        summary_from_act = act.get("summaryDTO") or {}
         feel = act.get("directWorkoutFeel")
+        if feel is None:
+            feel = summary_from_act.get("directWorkoutFeel")
         rpe = act.get("directWorkoutRpe")
+        if rpe is None:
+            rpe = summary_from_act.get("directWorkoutRpe")
 
         if (feel is None or rpe is None) and act_id:
             try:
-                details = client.get_activity_details(act_id)
-                summary = details.get("summaryDTO", {})
+                details = client.get_activity_details(act_id) or {}
+                summary = details.get("summaryDTO") or {}
                 if feel is None:
                     feel = summary.get("directWorkoutFeel")
+                    if feel is None:
+                        feel = details.get("directWorkoutFeel")
                 if rpe is None:
                     rpe = summary.get("directWorkoutRpe")
-            except Exception:
-                pass
+                    if rpe is None:
+                        rpe = details.get("directWorkoutRpe")
+            except Exception as e:
+                print(f"Warning: could not fetch activity details for {act_id}: {e}")
 
         # Extract time-in-zones directly present in SummarizedActivityDTO
         hr_zones = []

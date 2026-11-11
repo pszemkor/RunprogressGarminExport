@@ -96,6 +96,62 @@ def init_api(email: str | None = None, password: str | None = None, tokenstore: 
         print(f"❌ Connection error: {err}")
         return None
 
+_ACTIVITY_TYPE_MAP = {
+    "running": "running",
+    "treadmill_running": "running",
+    "trail_running": "running",
+    "track_running": "running",
+    "indoor_running": "running",
+    "street_running": "running",
+    "cycling": "cycling",
+    "virtual_ride": "cycling",
+    "indoor_cycling": "cycling",
+    "road_biking": "cycling",
+    "mountain_biking": "cycling",
+    "gravel_cycling": "cycling",
+}
+
+_RPE_MAP = {
+    0: "0. Rest",
+    10: "1. Very, very easy",
+    20: "2. Easy",
+    30: "3. Moderate",
+    40: "4. Somewhat hard",
+    50: "5. Hard",
+    60: "6. Really hard",
+    70: "7. Very hard",
+    80: "8. Extremely hard",
+    90: "9. Almost maximum",
+    100: "10. Maximum",
+}
+
+
+def normalize_activity_type(activity_type: str | None) -> str:
+    """Map Garmin activity subtypes (e.g. treadmill_running, virtual_ride) to core sheet categories."""
+    if not activity_type:
+        return "other"
+    normalized = str(activity_type).strip().lower()
+    return _ACTIVITY_TYPE_MAP.get(normalized, normalized)
+
+
+def _parse_rpe_score(raw_rpe) -> int | None:
+    """Normalize a numeric Garmin RPE score (0-100 scale) into an integer key."""
+    if raw_rpe is None or isinstance(raw_rpe, bool):
+        return None
+    try:
+        return int(round(float(raw_rpe)))
+    except (TypeError, ValueError):
+        return None
+
+
+def format_rpe(raw_rpe) -> str | None:
+    """Convert Garmin directWorkoutRpe (0-100) into the spreadsheet dropdown label."""
+    score = _parse_rpe_score(raw_rpe)
+    if score is None:
+        return None
+    return _RPE_MAP.get(score)
+
+
 def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data: list, status_data: dict, preds_data: dict, weekly_hr_zones: dict = None):
     try:
         import gspread
@@ -168,14 +224,14 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                 daily_activity_links = []  # All activity URLs for the day, in order
                 for act in training_data:
                     if act.get("startTime", "").startswith(date_str):
-                        t = act.get("activityType", "other")
+                        t = normalize_activity_type(act.get("activityType"))
                         if t not in daily_activities:
                             daily_activities[t] = {"distance": 0, "duration": 0, "load": 0, "rpe": None}
                         daily_activities[t]["distance"] += act.get("distanceKm") or 0
                         daily_activities[t]["duration"] += act.get("durationMinutes") or 0
                         daily_activities[t]["load"] += act.get("trainingLoad") or 0
                         
-                        act_rpe = act.get("rpe")
+                        act_rpe = _parse_rpe_score(act.get("rpe"))
                         if act_rpe is not None:
                             curr_rpe = daily_activities[t].get("rpe")
                             if curr_rpe is None or act_rpe > curr_rpe:
@@ -193,7 +249,7 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                 day_feel_acts = [act for act in training_data if act.get("startTime", "").startswith(date_str) and act.get("feel") is not None]
                 if day_feel_acts:
                     def sort_key(a):
-                        is_running = a.get("activityType") == "running"
+                        is_running = normalize_activity_type(a.get("activityType")) == "running"
                         dur = a.get("durationMinutes") or 0
                         return (is_running, dur)
                     day_feel_acts.sort(key=sort_key, reverse=True)
@@ -317,26 +373,15 @@ def export_to_google_sheets(spreadsheet_id: str, sleep_data: dict, training_data
                                 queue_update(f"{act_name} Duration", round(d["duration"], 2), i, 3)
                                 
                             if d.get("rpe") is not None and is_empty(4):
-                                _RPE_MAP = {
-                                    0: "0. Rest",
-                                    10: "1. Very, very easy",
-                                    20: "2. Easy",
-                                    30: "3. Moderate",
-                                    40: "4. Somewhat hard",
-                                    50: "5. Hard",
-                                    60: "6. Really hard",
-                                    70: "7. Very hard",
-                                    80: "8. Extremely hard",
-                                    90: "9. Almost maximum",
-                                    100: "10. Maximum"
-                                }
-                                rpe_str = _RPE_MAP.get(d["rpe"])
+                                rpe_str = format_rpe(d["rpe"])
                                 if rpe_str:
                                     queue_update(f"{act_name} RPE", rpe_str, i, 4)
+                                else:
+                                    print(f"Warning: unmapped RPE value {d['rpe']!r} for {act_name} on {date_str}")
                                     
                             if d["load"] > 0 and is_empty(5):
                                 queue_update(f"{act_name} Load", round(d["load"], 2), i, 5)
-                            else: 
+                            elif (c_idx + 5) < len(row):
                                 print("Load: " + str(row[c_idx+5]).strip())
 
                     # 3. Health Metrics

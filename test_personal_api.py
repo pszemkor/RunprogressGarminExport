@@ -132,3 +132,41 @@ def test_fetch_training_data_personal():
     assert act["rpe"] == 40
     assert len(act["hrZones"]) == 5
     assert act["hrZones"][3] == {"zoneNumber": 4, "secsInZone": 900.0}
+
+
+def test_fetch_training_data_personal_fetches_rpe_and_feel_from_details():
+    client = Mock(spec=GarminPersonalApiClient)
+    client.get_activities.return_value = [
+        {
+            "activityId": 1001,
+            "activityName": "Treadmill Run",
+            "activityType": {"typeKey": "treadmill_running"},
+            "startTimeLocal": "2026-11-08 10:00:00",
+            "duration": 1800.0,
+            "distance": 5000.0,
+        },
+        {
+            "activityId": 1002,
+            "activityName": "Virtual Ride",
+            "activityType": {"typeKey": "virtual_ride"},
+            "startTimeLocal": "2026-11-08 16:00:00",
+            "duration": 2400.0,
+            "distance": 20000.0,
+        },
+    ]
+    client.get_activity_details.side_effect = [
+        {"summaryDTO": {"directWorkoutFeel": 75, "directWorkoutRpe": 20}},
+        RuntimeError("transient error"),
+    ]
+
+    acts = fetch_training_data_personal(
+        client, datetime.date(2026, 11, 8), datetime.date(2026, 11, 8)
+    )
+
+    assert len(acts) == 2
+    assert acts[0]["activityType"] == "treadmill_running"
+    assert acts[0]["feel"] == 75
+    assert acts[0]["rpe"] == 20
+    assert acts[1]["activityType"] == "virtual_ride"
+    assert acts[1]["feel"] is None
+    assert acts[1]["rpe"] is None
